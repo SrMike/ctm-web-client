@@ -1,0 +1,26 @@
+# Archivos generados por tests
+test_*.py
+test_*_log.txt
+reporte_*.csv
+resumen_*.json
+log_*.txt
+output_*.txt
+*.em.json
+
+# Discovery (desarrollo local)
+discovery/
+
+# Scripts de prueba locales
+force_logout.py
+validate_*.py
+
+# Entorno y build
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+
+# Prompt local
+PROMPT_USO_BIBLIOTECA.txt
