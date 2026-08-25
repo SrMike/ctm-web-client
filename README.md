@@ -64,7 +64,7 @@ jobs = client.get_jobs(limit=1000)
 
 # Filtrar por nombre, folder, estado, servidor
 jobs = client.get_jobs(
-    job_name="MCTD*",
+    job_name="MJOB*",
     status="Ended Not OK",
     ctm_server="CTM_SERVER1",
 )

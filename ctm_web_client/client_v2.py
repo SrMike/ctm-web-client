@@ -786,9 +786,22 @@ class ControlMWebClient:
                 pass
         return resp.text
 
-    def get_job_output(self, job_id: str) -> str:
-        """Output/sysout de un job."""
-        resp = self._api_get(f"run/job/{job_id}/output")
+    def get_job_output(self, job_id: str, run_number: Optional[int] = None) -> str:
+        """
+        Output/sysout de un job.
+
+        Args:
+            job_id: ID del job (formato "SERVIDOR:RUNID").
+            run_number: Numero de ejecucion especifico (0, 1, 2...).
+                Si None, retorna el output de la ultima ejecucion.
+
+        Returns:
+            Texto del output.
+        """
+        path = f"run/job/{job_id}/output"
+        if run_number is not None:
+            path += f"?runNo={run_number}"
+        resp = self._api_get(path)
         content_type = resp.headers.get("content-type", "")
         if "json" in content_type and resp.text.strip():
             try:

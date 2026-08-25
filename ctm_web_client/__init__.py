@@ -24,7 +24,7 @@ from ctm_web_client.client_v2 import ControlMWebClient
 from ctm_web_client.exporters import JSONExporter, CSVExporter, TextExporter
 from ctm_web_client.proto_decoder import decode_em_response, decode_nested, decode_strings
 
-__version__ = "2.0.1"
+__version__ = "2.0.2"
 __all__ = [
     "ControlMWebClient",
     "JSONExporter", "CSVExporter", "TextExporter",

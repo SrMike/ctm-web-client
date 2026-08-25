@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctm-web-client"
-version = "2.0.1"
+version = "2.0.2"
 description = "Cliente Python para Control-M/EM Web: reportes, logs y monitoreo sin Automation API"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-or-later"}
 authors = [
-    {name = "MI19979"},
+    {name = "SrMike"},
 ]
 keywords = ["control-m", "controlm", "bmc", "scheduling", "monitoring", "reports"]
 classifiers = [
