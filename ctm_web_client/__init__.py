@@ -1,6 +1,6 @@
 """
-ctm_web_client - Biblioteca para extraer reportes y logs de Control-M/EM Web
-sin necesidad de acceso al API oficial.
+ctm_web_client - Biblioteca para extraer folders XML, reportes, logs y outputs
+de Control-M/EM Web mediante la sesión de la interfaz web.
 
 Uso básico:
     from ctm_web_client import ControlMWebClient
@@ -14,19 +14,20 @@ Uso básico:
     # Descargar log de un job
     log = client.get_job_log(job_id="SERVER:00abc")
 
-    # Exportar reporte
-    client.export_report("ejecuciones", format="csv", output_path="reporte.csv")
+    # Descargar un folder completo como XML nativo
+    folder_xml = client.get_folder_definition_xml("MI_FOLDER", "CTM_SERVER")
 
     client.logout()
 """
 
 from ctm_web_client.client_v2 import ControlMWebClient
+from ctm_web_client.downloader import ControlMDownloader
 from ctm_web_client.exporters import JSONExporter, CSVExporter, TextExporter
 from ctm_web_client.proto_decoder import decode_em_response, decode_nested, decode_strings
 
-__version__ = "2.0.2"
+__version__ = "2.1.0"
 __all__ = [
-    "ControlMWebClient",
+    "ControlMWebClient", "ControlMDownloader",
     "JSONExporter", "CSVExporter", "TextExporter",
     "decode_em_response", "decode_nested", "decode_strings",
 ]

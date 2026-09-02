@@ -1,3 +1,5 @@
 include README.md
+include CHANGELOG.md
+include RELEASING.md
 include LICENSE
 recursive-include ctm_web_client *.py

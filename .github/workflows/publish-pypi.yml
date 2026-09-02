@@ -1,0 +1,60 @@
+name: Publicar paquete en PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Validar y construir distribuciones
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar herramientas de prueba y empaquetado
+        run: python -m pip install --upgrade build twine pytest
+
+      - name: Ejecutar pruebas unitarias
+        run: python -m pytest -q tests
+
+      - name: Construir wheel y source distribution
+        run: python -m build
+
+      - name: Validar metadata y descripción del paquete
+        run: python -m twine check dist/*
+
+      - name: Guardar distribuciones
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+  publish:
+    name: Publicar en PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ctm-web-client
+    permissions:
+      id-token: write
+
+    steps:
+      - name: Descargar distribuciones
+        uses: actions/download-artifact@v4
+        with:
+          name: python-package-distributions
+          path: dist/
+
+      - name: Publicar mediante Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1

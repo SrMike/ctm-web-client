@@ -8,6 +8,7 @@ import logging
 from typing import Optional
 
 from ctm_web_client.client_v2 import ControlMWebClient
+from ctm_web_client.exceptions import ExportError
 from ctm_web_client.exporters import JSONExporter, CSVExporter, TextExporter
 
 logger = logging.getLogger(__name__)
@@ -15,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 class ControlMDownloader:
     """
-    Clase de alto nivel para descargas masivas de reportes y logs.
+    Clase de alto nivel para folders XML, reportes y logs.
 
     Combina ControlMWebClient con exportadores para facilitar
     la extracción y guardado de información en lote.
@@ -23,11 +24,12 @@ class ControlMDownloader:
     Ejemplo:
         downloader = ControlMDownloader(
             base_url="https://controlm:8443/ControlM",
-            username="user",
-            password="pass",
+            username=os.environ["CTM_USERNAME"],
+            password=os.environ["CTM_PASSWORD"],
             output_dir="./descargas"
         )
         downloader.download_all_logs(folder="PRODUCCION", date="2026-08-20")
+        downloader.download_folder_definition_xml("PRODUCCION", "CTM_SERVER")
         downloader.download_report("job_status_report", format="csv")
         downloader.close()
     """
@@ -195,6 +197,51 @@ class ControlMDownloader:
         else:
             path = os.path.join(reports_dir, f"report_{report_id}.json")
             return JSONExporter.export(data, path)
+
+    def download_folder_definition_xml(
+        self,
+        folder: str,
+        ctm_server: str,
+        output_path: Optional[str] = None,
+    ) -> str:
+        """
+        Descarga la definición XML nativa de un folder con todos sus jobs.
+
+        Args:
+            folder: Nombre exacto del folder.
+            ctm_server: Servidor Control-M que contiene el folder.
+            output_path: Ruta opcional. Si se omite, guarda el XML en
+                ``<output_dir>/folder_definitions/<folder>.xml``.
+
+        Returns:
+            Ruta absoluta del archivo XML creado.
+        """
+        content = self.client.get_folder_definition_xml(folder, ctm_server)
+
+        if output_path is None:
+            definitions_dir = os.path.join(self.output_dir, "folder_definitions")
+            safe_folder = "".join(
+                character if character.isalnum() or character in "._-" else "_"
+                for character in folder
+            ).rstrip(". ")
+            output_path = os.path.join(definitions_dir, f"{safe_folder}.xml")
+
+        absolute_path = os.path.abspath(output_path)
+        temporary_path = f"{absolute_path}.part"
+        try:
+            os.makedirs(os.path.dirname(absolute_path) or ".", exist_ok=True)
+            with open(temporary_path, "wb") as output_file:
+                output_file.write(content)
+            os.replace(temporary_path, absolute_path)
+            return absolute_path
+        except OSError as exc:
+            try:
+                os.remove(temporary_path)
+            except OSError:
+                pass
+            raise ExportError(
+                f"Error guardando la definición XML del folder: {exc}"
+            ) from exc
 
     def list_available_reports(self) -> list[dict]:
         """Lista reportes disponibles en la sección Reports."""

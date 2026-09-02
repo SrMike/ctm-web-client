@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctm-web-client"
-version = "2.0.2"
-description = "Cliente Python para Control-M/EM Web: reportes, logs y monitoreo sin Automation API"
+version = "2.1.0"
+description = "Cliente Python para Control-M/EM Web: reportes, logs, outputs y definiciones XML de folders"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "GPL-3.0-or-later"}
@@ -40,8 +40,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/MI19979/ctm-web-client"
-Issues = "https://github.com/MI19979/ctm-web-client/issues"
+Homepage = "https://github.com/SrMike/ctm-web-client"
+Issues = "https://github.com/SrMike/ctm-web-client/issues"
 
 [tool.setuptools.packages.find]
 include = ["ctm_web_client*"]

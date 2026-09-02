@@ -1,11 +1,15 @@
 # Archivos generados por tests
 test_*.py
+!tests/test_*.py
 test_*_log.txt
 reporte_*.csv
 resumen_*.json
 log_*.txt
 output_*.txt
 *.em.json
+controlm_output/
+folder_download_*/
+*.xml.part
 
 # Discovery (desarrollo local)
 discovery/
@@ -24,3 +28,4 @@ build/
 
 # Prompt local
 PROMPT_USO_BIBLIOTECA.txt
+PROMPT_USO_BIBLIOTECA.md

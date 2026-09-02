@@ -1,8 +1,21 @@
 # ctm-web-client
 
-Cliente Python para **Control-M/EM Web** (on-premise). Permite descargar reportes, logs de ejecucion y monitorear jobs sin necesidad de privilegios de Automation API.
+Cliente Python para **Control-M/EM Web** (on-premise). Permite descargar
+definiciones XML nativas de folders, reportes, logs, outputs y consultar jobs.
 
-Funciona usando los mismos endpoints internos que utiliza la interfaz web de Control-M.
+Inicia sesión con el mecanismo de Control-M Web y reutiliza esa sesión en los
+endpoints internos REST, EmWebServices y Automation API que usa la interfaz.
+No requiere un login ni un token independiente de Automation API.
+
+## Novedades de la versión 2.1.0
+
+- Descarga directa de folders completos en XML nativo mediante
+    `get_folder_definition_xml()`.
+- Persistencia atómica mediante `download_folder_definition_xml()`.
+- Validación de raíz `DEFTABLE` y coincidencia exacta del folder solicitado.
+- `ControlMDownloader` disponible desde la API pública del paquete.
+- Se mantienen el filtrado local por `orderDate` y las correcciones de
+    compatibilidad de la versión 2.0.5.
 
 ## Instalacion
 
@@ -19,10 +32,17 @@ pip install -e .
 ## Uso rapido
 
 ```python
+import os
+from getpass import getpass
+
 from ctm_web_client import ControlMWebClient
 
-with ControlMWebClient("https://controlm-server:8443/ControlM", verify_ssl=False) as client:
-    client.login("usuario", "password")
+base_url = os.environ.get("CTM_BASE_URL", "https://controlm.example:8443/ControlM")
+username = os.environ.get("CTM_USERNAME", "usuario")
+password = os.environ.get("CTM_PASSWORD") or getpass("Password: ")
+
+with ControlMWebClient(base_url, verify_ssl=True) as client:
+    client.login(username, password)
 
     # Jobs activos con filtros
     jobs = client.get_jobs(status="Ended Not OK", limit=100)
@@ -83,6 +103,55 @@ log = client.get_job_log("CTM_SERVER1:abc123")
 output = client.get_job_output("CTM_SERVER1:abc123")
 ```
 
+### Definición XML nativa de un folder
+
+La descarga directa incluye el folder y todos sus jobs definidos:
+
+```python
+xml_bytes = client.get_folder_definition_xml(
+    folder="PRODUCCION",
+    ctm_server="CTM_SERVER1",
+)
+
+with open("PRODUCCION.xml", "wb") as output_file:
+    output_file.write(xml_bytes)
+```
+
+El método consulta `GET /automation-api/deploy/jobs` con `format=xml`, usando
+la sesión web existente. Retorna `bytes` para preservar exactamente la
+codificación enviada por Control-M. No confía en `Content-Type`, porque algunas
+versiones declaran `application/json` aunque el cuerpo sea XML.
+
+Antes de devolver el contenido, comprueba:
+
+- XML bien formado;
+- raíz `DEFTABLE`;
+- exactamente un `FOLDER` con el nombre solicitado.
+
+Para guardarlo desde la API de alto nivel:
+
+```python
+from ctm_web_client import ControlMDownloader
+
+with ControlMDownloader(
+    base_url,
+    username,
+    password,
+    output_dir="./controlm_output",
+    verify_ssl=True,
+) as downloader:
+    path = downloader.download_folder_definition_xml(
+        folder="PRODUCCION",
+        ctm_server="CTM_SERVER1",
+    )
+    print(path)
+```
+
+Por defecto se guarda en
+`controlm_output/folder_definitions/PRODUCCION.xml`. También acepta
+`output_path` para elegir otra ubicación. La escritura usa un archivo temporal
+`.part` y reemplazo atómico para no dejar un XML incompleto.
+
 ### Reportes
 
 ```python
@@ -137,13 +206,16 @@ parsed = decode_nested(raw)
 
 - Python 3.10+
 - Acceso de red al servidor Control-M/EM Web (puerto 8443)
-- Credenciales de usuario web de Control-M (no requiere privilegios de Automation API)
+- Credenciales de usuario web de Control-M
+- Permiso para consultar los endpoints internos requeridos
 
 ## Notas
 
 - El servidor tiene un limite bajo de sesiones concurrentes. Siempre usa `with` o llama `client.logout()`.
-- Los certificados SSL son self-signed en la mayoria de instalaciones on-premise. Usa `verify_ssl=False`.
+- En producción usa `verify_ssl=True`. Usa `verify_ssl=False` solamente en un
+    entorno controlado con certificados autofirmados.
 - Los `jobId` tienen formato `SERVIDOR:RUNID` (ej: `CTM_SERVER1:abc123`).
+- Nunca guardes usuarios, passwords, tokens ni cookies en el código o logs.
 
 ## Licencia
 
@@ -159,7 +231,7 @@ from ctm_web_client.exceptions import (
 )
 
 try:
-    client.login("user", "wrong_pass")
+    client.login(username, password)
 except AuthenticationError as e:
     print(f"Login fallido: {e}")
 
@@ -168,23 +240,21 @@ try:
 except ResourceNotFoundError:
     print("Job no encontrado")
 except SessionExpiredError:
-    client.login("user", "pass")  # Re-autenticar
+    print("La sesión expiró; vuelve a autenticar.")
 ```
 
 ## Notas importantes
 
-- La biblioteca interactúa con los endpoints internos de la interfaz web de Control-M/EM. Los paths exactos pueden variar según la versión instalada.
-- Si tu Control-M usa paths diferentes, puedes sobrescribir `ControlMWebClient._ENDPOINTS`.
-- Para certificados SSL autofirmados, usa `verify_ssl=False`.
-- Compatible con Control-M/EM v9.x y v20.x (Web interface).
+- La biblioteca interactúa con endpoints internos no públicos de Control-M/EM.
+    Las rutas, payloads y respuestas pueden cambiar entre versiones.
+- La descarga XML directa fue validada con un folder de 109 jobs: los nombres,
+    elementos y valores funcionales coincidieron con la exportación de Workspace.
+- El XML directo puede diferir del exportado desde Workspace en indentación,
+    orden, metadata de versión y ausencia del nodo transitorio `WORKSPACE`.
+- La compatibilidad debe validarse contra cada instalación objetivo.
 
-## Personalizar endpoints
+## Seguridad de publicación
 
-Si tu instalación de Control-M usa rutas diferentes:
-
-```python
-client = ControlMWebClient("https://server:8443/ControlM")
-client._ENDPOINTS["jobs"] = "/web/api/monitoring/jobs"
-client._ENDPOINTS["job_log"] = "/web/api/job/{job_id}/log"
-client.login("user", "pass")
-```
+Antes de publicar una versión, revisa que no se incluyan archivos locales,
+capturas de navegador, outputs, logs, cookies, tokens, credenciales o URLs
+internas. Los ejemplos de este documento utilizan valores ficticios.

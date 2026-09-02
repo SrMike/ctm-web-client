@@ -6,12 +6,16 @@ Autenticación confirmada (Phase 1-5 discovery):
 - REST endpoints: Header "Authorization: Bearer <EM_TOKEN>"
 - EmWebServices: body {"data": "<protobuf con username+token en base64>"}
 - Sesión: cookies JSESSIONID + EM_TOKEN
+
+El cliente reutiliza la sesión web en endpoints REST, EmWebServices y rutas
+internas de Automation API. No realiza un login independiente de Automation API.
 """
 
 import base64
 import logging
 import warnings
 from typing import Optional
+from xml.etree import ElementTree
 
 import requests
 
@@ -64,8 +68,8 @@ class ControlMWebClient:
     """
     Cliente HTTP para Control-M/EM Web (on-premise).
 
-    Usa los endpoints internos de la interfaz web para extraer datos
-    sin necesidad de acceso a la Automation API.
+    Usa los endpoints internos de la interfaz web para extraer datos. Algunas
+    operaciones reutilizan la sesión web en rutas internas de Automation API.
 
     Args:
         base_url: URL base (ej: "https://server:8443/ControlM")
@@ -954,6 +958,7 @@ class ControlMWebClient:
         job_name: Optional[str] = None,
         status: Optional[str] = None,
         ctm_server: Optional[str] = None,
+        date: Optional[str] = None,
         limit: int = 1000,
     ) -> list:
         """
@@ -964,6 +969,7 @@ class ControlMWebClient:
             job_name: Filtrar por nombre de job (soporta wildcards *).
             status: "Ended OK", "Ended Not OK", "Executing", "Wait Condition", etc.
             ctm_server: Servidor Control-M específico.
+            date: Fecha de orden en formato YYYY-MM-DD o YYYYMMDD.
             limit: Máximo de resultados.
         """
         params = {"limit": str(limit)}
@@ -976,7 +982,15 @@ class ControlMWebClient:
         if ctm_server:
             params["ctm"] = ctm_server
         data = self.get_jobs_status(params)
-        return data.get("statuses", data) if isinstance(data, dict) else data
+        jobs = data.get("statuses", data) if isinstance(data, dict) else data
+        if date and isinstance(jobs, list):
+            normalized_date = date.replace("-", "")
+            jobs = [
+                job for job in jobs
+                if isinstance(job, dict)
+                and str(job.get("orderDate", "")).replace("-", "") == normalized_date
+            ]
+        return jobs
 
     def get_history(
         self,
@@ -1041,6 +1055,79 @@ class ControlMWebClient:
                     folders.add(f)
             return [{"name": f} for f in sorted(folders)]
         return []
+
+    def get_folder_definition_xml(
+        self,
+        folder: str,
+        ctm_server: str,
+    ) -> bytes:
+        """
+        Descarga la definición XML nativa de un folder y todos sus jobs.
+
+        Usa la sesión web autenticada para consultar el endpoint interno
+        ``GET /automation-api/deploy/jobs``. El servidor puede declarar
+        incorrectamente ``application/json`` aunque el cuerpo sea XML, por lo
+        que la validación se realiza sobre el contenido.
+
+        Args:
+            folder: Nombre exacto del folder.
+            ctm_server: Nombre del servidor Control-M que contiene el folder.
+
+        Returns:
+            Documento XML original, sin recodificar, como bytes.
+
+        Raises:
+            ValueError: Si folder o ctm_server están vacíos.
+            ControlMWebError: Si la respuesta no es un DEFTABLE válido o no
+                contiene el folder solicitado.
+        """
+        folder = folder.strip()
+        ctm_server = ctm_server.strip()
+        if not folder:
+            raise ValueError("folder no puede estar vacío.")
+        if not ctm_server:
+            raise ValueError("ctm_server no puede estar vacío.")
+
+        response = self._api_get(
+            "deploy/jobs",
+            params={
+                "format": "xml",
+                "folder": folder,
+                "ctm": ctm_server,
+                "useArrayFormat": "false",
+            },
+        )
+        if response.status_code >= 400:
+            raise ControlMWebError(
+                f"No se pudo descargar el folder {folder!r} "
+                f"(HTTP {response.status_code})."
+            )
+
+        content = response.content
+        try:
+            root = ElementTree.fromstring(content)
+        except ElementTree.ParseError as exc:
+            raise ControlMWebError(
+                f"El servidor no devolvió XML válido para el folder {folder!r}."
+            ) from exc
+
+        if root.tag != "DEFTABLE":
+            raise ControlMWebError(
+                f"Raíz XML inesperada para el folder {folder!r}: {root.tag!r}."
+            )
+
+        matching_folders = [
+            node
+            for node in root.findall(".//FOLDER")
+            if node.get("FOLDER_NAME") == folder
+        ]
+        if len(matching_folders) != 1:
+            raise ControlMWebError(
+                f"La respuesta contiene {len(matching_folders)} folders "
+                f"con nombre exacto {folder!r}; se esperaba uno."
+            )
+
+        return content
 
     def get_report_data(self, report_name: str, params: Optional[dict] = None) -> dict:
         """
