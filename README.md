@@ -74,6 +74,64 @@ with open("reporte.csv", "wb") as f:
     f.write(csv_bytes)
 ```
 
+## Catálogo de reportes guardados (RF-Server)
+
+Gestiona los reportes guardados en el catálogo de Control-M Web (motor
+interno `RF-Server`), incluyendo listar, cargar metadata completa, guardar
+copias ("Save As") y eliminar:
+
+```python
+# Listar todos los reportes guardados
+reports = client.list_saved_reports()
+for r in reports:
+    print(r["reportId"], r["reportName"])
+
+# Cargar metadata completa de un reporte existente
+metadata = client.get_report_metadata(
+    "Jobs Definitions_1",
+    category_id="2",
+    report_design_name="jobs-definitions.rptdesign",
+    template_id=5,
+)
+
+# Guardar una copia con nuevo nombre (recomendado para crear reportes)
+nuevo = client.save_report_as("Jobs Definitions_1", "Jobs Definitions - Copia")
+print(nuevo["reportId"])
+
+# Crear un reporte nuevo a partir de un archivo .em.json (contraparte de
+# run_report_from_file(): esta SI lo guarda en el catalogo)
+nuevo_desde_archivo = client.create_report_from_file("mi_reporte.em.json")
+print(nuevo_desde_archivo["reportId"])
+
+# Eliminar un reporte por su reportId
+client.delete_report(nuevo["reportId"])
+```
+
+`create_report_from_file()` requiere que ya exista en el catálogo un
+reporte guardado con el mismo `reportDesignName`/`templateId` (propio o
+indicado con `source_report_name`), del cual toma el esqueleto de
+`columns` — no se puede construir desde cero.
+
+`delete_report()` requiere headers exactos (`Accept: txt/html`, sin
+`Content-Type`, header `server-name` vacío) confirmados contra una captura
+real del navegador; ya están aplicados internamente, no hace falta pasarlos.
+
+### Exportar todos los reportes a .em.json
+
+El script `export_all_reports_em_json.py` (en la raíz del repo) descarga
+**todos** los reportes guardados de la cuenta autenticada como archivos
+`.em.json` individuales, replicando el mismo shape que produce el botón
+"Export" de la UI de Reports:
+
+```bash
+python export_all_reports_em_json.py
+```
+
+Guarda cada reporte en `em_json_export/<nombre_sanitizado>.em.json` y un log
+detallado en `discovery/export_all_reports_em_json_<timestamp>.txt`, listando
+éxitos y fallos por reporte (algunos pueden fallar si tienen filtros
+obligatorios no satisfechos por los valores por defecto).
+
 ## Funcionalidades
 
 ### Jobs activos

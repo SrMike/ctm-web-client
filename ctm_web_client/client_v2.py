@@ -98,6 +98,7 @@ class ControlMWebClient:
         self._em_token: Optional[str] = None
         self._username: Optional[str] = None
         self._auth_data: Optional[str] = None  # protobuf base64 para EmWebServices
+        self._rf_server_warmed_up = False  # ver _ensure_rf_server_session()
 
     @property
     def is_authenticated(self) -> bool:
@@ -176,9 +177,11 @@ class ControlMWebClient:
             self._authenticated = False
             raise SessionExpiredError("Sesión expirada. Ejecuta login() de nuevo.")
         if resp.status_code == 404:
-            raise ResourceNotFoundError(f"No encontrado: {url}")
+            detail = (resp.text or "")[:500]
+            raise ResourceNotFoundError(f"No encontrado: {url} | Respuesta: {detail}")
         if resp.status_code >= 500:
-            raise ControlMWebError(f"Error servidor {resp.status_code}: {url}")
+            detail = (resp.text or "")[:500]
+            raise ControlMWebError(f"Error servidor {resp.status_code}: {url} | Respuesta: {detail}")
 
     def _decode_em_data(self, response: dict) -> bytes:
         """Decodifica el campo 'data' protobuf de un EmWebService response."""
@@ -295,6 +298,7 @@ class ControlMWebClient:
 
         self._em_token = em_token
         self._authenticated = True
+        self._rf_server_warmed_up = False
         logger.info("Login exitoso en Control-M Web.")
 
     def logout(self) -> None:
@@ -754,6 +758,487 @@ class ControlMWebClient:
         raise ControlMWebError(
             f"Timeout esperando reporte {report_id} (max {max_wait}s)"
         )
+
+    # ─────────────────────────────────────────────────────────────────────
+    # RF-Server: motor de reportes (guardar/crear/borrar) — confirmado por
+    # ingenieria inversa (discovery Phase 12). Es una CUARTA superficie
+    # interna, separada de /automation-api/ y /ControlM/rest/, usada por la
+    # SPA independiente de Reports (/Reports/Login). Reutiliza la misma
+    # sesion web (cookies) sin login adicional.
+    #
+    # Autenticacion CONFIRMADA por captura de headers reales del navegador
+    # (discovery Phase 13, 2026-09-22): el navegador NUNCA envia
+    # 'Authorization: Bearer <token>' a este subsistema. En su lugar,
+    # depende de las cookies de sesion (EM_TOKEN/JSESSIONID/key) y, en las
+    # llamadas que devuelven datos especificos del usuario, agrega un
+    # header adicional 'user-id: <EM_TOKEN>'. Enviar 'Authorization: Bearer'
+    # (como hacia esta version antes del fix) es una desviacion del
+    # comportamiento real y es la causa mas probable del HTTP 500 sin
+    # cuerpo reportado en getAllUserReports/loadReportMetadata.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def _ensure_rf_server_session(self) -> None:
+        """
+        Calienta el contexto de RF-Server antes de la primera llamada de
+        datos de la sesion actual.
+
+        Motivo (confirmado empiricamente el 2026-09-22): al llamar
+        directamente a un endpoint de datos como GET getAllUserReports o
+        POST loadReportMetadata sin haber tocado antes ningun otro endpoint
+        de RF-Server en la misma sesion, el servidor responde HTTP 500 sin
+        cuerpo. En el trafico capturado por Playwright (discovery Phase 12),
+        el navegador SIEMPRE invoca esta secuencia de endpoints de
+        configuracion/estado al cargar la SPA de Reports, antes de
+        getAllUserReports/loadReportMetadata/addNewReport/deleteReport:
+        getIsReportingAllowed, getReportPrivileges, isSaasMockMode,
+        isSaasMode, compatibilityMode. Replicar esa secuencia una vez por
+        sesion autenticada evita el 500. La causa raiz en el servidor no fue
+        confirmada (posible estado inicializado perezosamente en la sesion
+        HTTP); esto es una mitigacion empirica, no un endpoint inventado:
+        los 5 GET ya estaban confirmados como parte del flujo real.
+        """
+        if self._rf_server_warmed_up:
+            return
+        self._rf_server_warmed_up = True  # marcar antes para no reintentar en cada llamada si falla
+
+        base = f"{self.base_url.rsplit('/ControlM', 1)[0]}/RF-Server"
+        headers = {"user-id": self._em_token} if self._em_token else {}
+        warm_up_paths = (
+            "config/getIsReportingAllowed",
+            "report/getReportPrivileges",
+            "environmentApi/isSaasMockMode",
+            "environmentApi/isSaasMode",
+            "config/compatibilityMode",
+        )
+        for path in warm_up_paths:
+            try:
+                self._session.get(
+                    f"{base}/{path}", headers=headers,
+                    verify=self.verify_ssl, timeout=self.timeout,
+                )
+            except requests.exceptions.RequestException:
+                pass  # calentamiento best-effort: no debe bloquear la llamada real
+
+    def _rf_server_get(self, path: str, **kwargs) -> requests.Response:
+        """GET al motor de reportes RF-Server."""
+        if not self._session or not self._authenticated:
+            raise ControlMWebError("No autenticado. Ejecuta login() primero.")
+        self._ensure_rf_server_session()
+
+        url = f"{self.base_url.rsplit('/ControlM', 1)[0]}/RF-Server/{path.lstrip('/')}"
+        headers = {"user-id": self._em_token} if self._em_token else {}
+        resp = self._session.get(
+            url, headers=headers, verify=self.verify_ssl, timeout=self.timeout, **kwargs
+        )
+        self._check_response(resp, url)
+        return resp
+
+    def _rf_server_post(self, path: str, json_body=None, **kwargs) -> requests.Response:
+        """POST al motor de reportes RF-Server."""
+        if not self._session or not self._authenticated:
+            raise ControlMWebError("No autenticado. Ejecuta login() primero.")
+        self._ensure_rf_server_session()
+
+        url = f"{self.base_url.rsplit('/ControlM', 1)[0]}/RF-Server/{path.lstrip('/')}"
+        headers = {"user-id": self._em_token} if self._em_token else {}
+        resp = self._session.post(
+            url, json=json_body, headers=headers,
+            verify=self.verify_ssl, timeout=self.timeout, **kwargs
+        )
+        self._check_response(resp, url)
+        return resp
+
+    def _rf_server_delete(self, path: str, params: Optional[dict] = None, **kwargs) -> requests.Response:
+        """
+        DELETE al motor de reportes RF-Server.
+
+        CORREGIDO (2026-09-23, Phase 14): una captura real del navegador
+        (discovery_phase14_delete_capture_20260923_171232.txt) haciendo un
+        borrado real de reporte confirmo HTTP 200 (no 500) con estos
+        detalles, DISTINTOS a lo que el cliente enviaba antes:
+        - 'Accept: txt/html' (NO 'application/json'; la sesion fija
+          application/json globalmente desde login(), y ese Accept
+          especifico rompia este endpoint).
+        - Header 'server-name' presente pero con valor VACIO ('').
+        - Sin 'Content-Type' ni cuerpo (ni siquiera 'json={}'); el intento
+          anterior de mandar 'json={}' fue probado y confirmado INEFICAZ.
+        - El identificador sigue viajando solo en la query string
+          ('report-id'), sin cambios.
+        """
+        if not self._session or not self._authenticated:
+            raise ControlMWebError("No autenticado. Ejecuta login() primero.")
+        self._ensure_rf_server_session()
+
+        url = f"{self.base_url.rsplit('/ControlM', 1)[0]}/RF-Server/{path.lstrip('/')}"
+        # 'Content-Type: None' le indica a requests que NO envie el header
+        # 'Content-Type: application/json' fijado globalmente por login(),
+        # replicando que el navegador real no manda Content-Type en este DELETE.
+        headers = {"Accept": "txt/html", "server-name": "", "Content-Type": None}
+        if self._em_token:
+            headers["user-id"] = self._em_token
+        resp = self._session.delete(
+            url, headers=headers, params=params,
+            verify=self.verify_ssl, timeout=self.timeout, **kwargs
+        )
+        self._check_response(resp, url)
+        return resp
+
+    def list_saved_reports(self) -> list:
+        """
+        Lista los reportes guardados en el catalogo usando el motor de
+        reportes RF-Server: GET /RF-Server/report/getAllUserReports.
+
+        Este es el endpoint de listado CONFIRMADO por ingenieria inversa
+        (Phase 12). A diferencia de get_reports() (que usa
+        /automation-api/reporting/report y puede responder 405 Method Not
+        Allowed en algunos entornos on-prem), este endpoint devolvio la
+        lista completa y correcta en el entorno de referencia.
+
+        Returns:
+            Lista de dicts con la metadata completa de cada reporte
+            (reportId, categoryId, reportName, description,
+            reportDesignName, templateId, userName, isFavorite,
+            createTime, updateTime, isPublic, lastUsedTime, columns, etc).
+        """
+        resp = self._rf_server_get("report/getAllUserReports")
+        return resp.json()
+
+    def get_report_metadata(
+        self,
+        report_name: str,
+        description: str = "",
+        user_data: Optional[dict] = None,
+        category_id: Optional[str] = None,
+        report_design_name: Optional[str] = None,
+        template_id: Optional[int] = None,
+    ) -> dict:
+        """
+        Carga la metadata completa (incluye 'columns' con sus filtros) de
+        un reporte existente por nombre: POST
+        /RF-Server/report/loadReportMetadata.
+
+        Esta metadata es la base necesaria para guardar una copia del
+        reporte (ver save_report_as()): el array 'columns' depende del
+        diseno BIRT (.rptdesign) del reporte y no se construye desde cero
+        en el cliente.
+
+        CORREGIDO (2026-09-23): una captura real confirmada (Phase 12,
+        request_031_loadReportMetadata.json) demuestra que el servidor
+        devuelve HTTP 500 (cuerpo vacio) si el payload NO incluye
+        'categoryId', 'reportDesignName' y 'templateId' en el nivel
+        superior, ni 'userColumns'/'userGeneralConfigurations' dentro de
+        'userData'. La afirmacion previa de que el servidor acepta listas
+        vacias sin estos campos quedo refutada por validacion en vivo
+        (test_rf_server_fix.py, 2026-09-23): fallo con HTTP 500 al omitir
+        estos campos. Pasa siempre los valores exactos devueltos por
+        list_saved_reports() para el reporte de origen.
+
+        Args:
+            report_name: Nombre exacto de un reporte existente (ver
+                list_saved_reports()).
+            description: Descripcion a enviar en la solicitud. El flujo
+                confirmado reenvia la misma descripcion del reporte
+                original.
+            user_data: Dict opcional con userSorts/userGroups/userFilters/
+                userColumns/userGeneralConfigurations. Si se omite, se
+                envian listas vacias y una configuracion general por
+                defecto (PDF/CSV/EXCEL, preview permitido); esto NO esta
+                confirmado como aceptado para todos los reportes y puede
+                seguir produciendo 500 en reportes con filtros obligatorios.
+            category_id: 'categoryId' del reporte de origen (ver
+                list_saved_reports()). Fuertemente recomendado.
+            report_design_name: 'reportDesignName' del reporte de origen
+                (ver list_saved_reports()). Fuertemente recomendado.
+            template_id: 'templateId' del reporte de origen (ver
+                list_saved_reports()). Fuertemente recomendado.
+
+        Returns:
+            Dict con la metadata completa del reporte (mismo shape que un
+            elemento de list_saved_reports()).
+        """
+        payload = {
+            "reportName": report_name,
+            "description": description,
+            "userData": user_data or {
+                "userSorts": [],
+                "userGroups": [],
+                "userFilters": [],
+                "userColumns": [],
+                "userGeneralConfigurations": {
+                    "allowedFormats": ["PDF", "CSV", "EXCEL"],
+                    "isPreviewAllowed": True,
+                },
+            },
+        }
+        if category_id is not None:
+            payload["categoryId"] = category_id
+        if report_design_name is not None:
+            payload["reportDesignName"] = report_design_name
+        if template_id is not None:
+            payload["templateId"] = template_id
+        resp = self._rf_server_post("report/loadReportMetadata", json_body=payload)
+        return resp.json()
+
+    def validate_report_name(
+        self,
+        report_name: str,
+        description: str = "",
+        user_data: Optional[dict] = None,
+    ) -> bool:
+        """
+        Valida un nombre/definicion de reporte contra el servidor: POST
+        /RF-Server/report/validateReport. Confirmado que la UI llama este
+        endpoint antes de loadReportMetadata/addNewReport.
+
+        Returns:
+            Booleano devuelto por el servidor. Solo se confirmo el caso
+            de exito (respuesta `true`); el significado exacto de una
+            respuesta `false` (por ejemplo nombre duplicado) no fue
+            confirmado por ingenieria inversa — trata cualquier `False`
+            como una limitacion pendiente de investigar, no como un error
+            garantizado de "nombre duplicado".
+        """
+        payload = {
+            "reportName": report_name,
+            "description": description,
+            "userData": user_data or {"userSorts": [], "userGroups": [], "userFilters": []},
+        }
+        resp = self._rf_server_post("report/validateReport", json_body=payload)
+        return bool(resp.json())
+
+    def create_report(self, report_definition: dict) -> dict:
+        """
+        Crea (guarda) un reporte nuevo: POST /RF-Server/report/addNewReport.
+
+        Metodo de BAJO NIVEL: `report_definition` debe tener el shape
+        completo confirmado por ingenieria inversa (Phase 12), e incluir
+        como minimo un 'columns' obtenido de get_report_metadata() de un
+        reporte existente con el mismo reportDesignName/templateId.
+        Construir 'columns' desde cero NO esta soportado en esta version:
+        su esquema depende del diseno BIRT del reporte y no fue confirmado
+        para reportes sin plantilla base. Para el caso de uso comun
+        ("Save As" de un reporte existente), usa save_report_as().
+
+        Si 'reportId' no esta presente en `report_definition`, se
+        establece a "NEW_REPORT" (valor confirmado: el servidor lo
+        interpreta como "crear nuevo" y devuelve un UUID real en la
+        respuesta). Si 'userName' no esta presente, se usa el usuario
+        autenticado actual.
+
+        Args:
+            report_definition: Dict con el shape confirmado (reportId,
+                categoryId, reportName, description, reportDesignName,
+                templateId, columns, userData, etc).
+
+        Returns:
+            Dict con la metadata del reporte guardado, incluyendo el
+            'reportId' (UUID) generado por el servidor.
+        """
+        payload = dict(report_definition)
+        payload.setdefault("reportId", "NEW_REPORT")
+        payload.setdefault("userName", self._username)
+        resp = self._rf_server_post("report/addNewReport", json_body=payload)
+        return resp.json()
+
+    def save_report_as(
+        self,
+        source_report_name: str,
+        new_report_name: str,
+        description: Optional[str] = None,
+    ) -> dict:
+        """
+        Guarda una copia de un reporte existente con un nuevo nombre
+        ("Save As"), replicando el flujo confirmado por ingenieria inversa
+        (Phase 12): get_report_metadata(source) -> addNewReport(copia con
+        nuevo nombre).
+
+        Esta es la forma RECOMENDADA de crear reportes con esta
+        biblioteca: reutiliza un 'columns'/'userData' ya validado por el
+        servidor en lugar de construirlo manualmente (ver limitacion de
+        create_report()).
+
+        Args:
+            source_report_name: Nombre exacto de un reporte ya guardado
+                (ver list_saved_reports()) que sirva de plantilla.
+            new_report_name: Nombre para el reporte nuevo.
+            description: Descripcion nueva; si se omite, se reutiliza la
+                del reporte original.
+
+        Returns:
+            Dict con la metadata del reporte guardado (incluye el nuevo
+            'reportId' generado por el servidor).
+
+        Raises:
+            ControlMWebError: Si el servidor rechaza la operacion, o si
+                `source_report_name` no aparece en list_saved_reports().
+        """
+        existing_reports = self.list_saved_reports()
+        source_entry = next(
+            (r for r in existing_reports if r.get("reportName") == source_report_name),
+            None,
+        )
+        if source_entry is None:
+            raise ControlMWebError(
+                f"Reporte de origen no encontrado en list_saved_reports(): "
+                f"{source_report_name!r}"
+            )
+
+        metadata = self.get_report_metadata(
+            source_report_name,
+            description=source_entry.get("description", ""),
+            category_id=source_entry.get("categoryId"),
+            report_design_name=source_entry.get("reportDesignName"),
+            template_id=source_entry.get("templateId"),
+        )
+
+        new_definition = dict(metadata)
+        new_definition["reportId"] = "NEW_REPORT"
+        new_definition["reportName"] = new_report_name
+        if description is not None:
+            new_definition["description"] = description
+        new_definition["userName"] = self._username
+        new_definition["isFavorite"] = None
+        new_definition["createTime"] = None
+        new_definition["updateTime"] = None
+        new_definition["isPublic"] = None
+        new_definition["lastUsedTime"] = None
+
+        resp = self._rf_server_post("report/addNewReport", json_body=new_definition)
+        return resp.json()
+
+    def create_report_from_file(
+        self,
+        em_json_path: str,
+        source_report_name: Optional[str] = None,
+        new_report_name: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> dict:
+        """
+        Crea (guarda) un reporte nuevo en el catalogo a partir de un
+        archivo .em.json (el mismo formato que consume
+        run_report_from_file() y que produce el boton "Export" de la UI
+        de Reports).
+
+        Contraparte de run_report_from_file(): mientras ese metodo solo
+        EJECUTA el reporte del archivo, este lo GUARDA como una entrada
+        nueva del catalogo (POST /RF-Server/report/addNewReport).
+
+        LIMITACION HEREDADA de create_report()/save_report_as(): el array
+        'columns' no se puede construir desde cero (depende del diseno
+        BIRT del reporte). Por eso este metodo, igual que save_report_as(),
+        toma prestado el esqueleto de 'columns' de un reporte YA GUARDADO
+        en el catalogo con el mismo reportDesignName/templateId, y encima
+        aplica el 'userData'/'description'/'categoryId'/'reportDesignName'/
+        'templateId' del archivo. Replica el flujo validado end-to-end en
+        test_report_lifecycle.py.
+
+        Args:
+            em_json_path: Ruta a un archivo .em.json (debe incluir al
+                menos 'reportName'; tipicamente tambien 'description',
+                'userData', 'categoryId', 'reportDesignName',
+                'templateId').
+            source_report_name: Nombre exacto de un reporte ya guardado
+                (ver list_saved_reports()) que sirva de plantilla de
+                columnas. Si se omite, se usa el 'reportName' del propio
+                archivo (asume que ya existe un reporte guardado con ese
+                nombre en el catalogo).
+            new_report_name: Nombre para el reporte nuevo. Si se omite, se
+                usa el 'reportName' del archivo.
+            description: Descripcion para el reporte nuevo; si se omite,
+                se usa la del archivo (o la del reporte fuente si el
+                archivo no trae 'description').
+
+        Returns:
+            Dict con la metadata del reporte guardado, incluyendo el
+            'reportId' (UUID) generado por el servidor.
+
+        Raises:
+            ControlMWebError: si no se pudo determinar un reporte fuente,
+                si ese nombre no aparece en list_saved_reports(), o si el
+                servidor rechaza la operacion.
+
+        OPERACION MUTATIVA: crea un reporte real en el catalogo del
+        servidor.
+        """
+        import json as _json
+        with open(em_json_path, "r", encoding="utf-8") as f:
+            em_json = _json.load(f)
+
+        file_report_name = em_json.get("reportName", "")
+        resolved_source_name = source_report_name or file_report_name
+        if not resolved_source_name:
+            raise ControlMWebError(
+                "No se pudo determinar el reporte fuente: el archivo no "
+                "tiene 'reportName' y no se paso source_report_name."
+            )
+
+        existing_reports = self.list_saved_reports()
+        source_entry = next(
+            (r for r in existing_reports if r.get("reportName") == resolved_source_name),
+            None,
+        )
+        if source_entry is None:
+            raise ControlMWebError(
+                f"Reporte de origen no encontrado en list_saved_reports(): "
+                f"{resolved_source_name!r}. create_report_from_file() "
+                f"necesita un reporte ya guardado con el mismo "
+                f"reportDesignName/templateId para tomar el esqueleto de "
+                f"'columns' (no se puede construir desde cero)."
+            )
+
+        metadata = self.get_report_metadata(
+            resolved_source_name,
+            description=source_entry.get("description", ""),
+            category_id=source_entry.get("categoryId"),
+            report_design_name=source_entry.get("reportDesignName"),
+            template_id=source_entry.get("templateId"),
+        )
+
+        new_definition = dict(metadata)
+        new_definition["reportId"] = "NEW_REPORT"
+        new_definition["reportName"] = new_report_name or file_report_name or resolved_source_name
+        new_definition["description"] = (
+            description if description is not None
+            else em_json.get("description", metadata.get("description", ""))
+        )
+        new_definition["categoryId"] = em_json.get("categoryId", metadata.get("categoryId"))
+        new_definition["reportDesignName"] = em_json.get("reportDesignName", metadata.get("reportDesignName"))
+        new_definition["templateId"] = em_json.get("templateId", metadata.get("templateId"))
+        new_definition["userData"] = em_json.get("userData", metadata.get("userData"))
+        new_definition["userName"] = self._username
+        new_definition["isFavorite"] = None
+        new_definition["createTime"] = None
+        new_definition["updateTime"] = None
+        new_definition["isPublic"] = None
+        new_definition["lastUsedTime"] = None
+
+        resp = self._rf_server_post("report/addNewReport", json_body=new_definition)
+        return resp.json()
+
+    def delete_report(self, report_id: str) -> None:
+        """
+        Elimina un reporte guardado: DELETE
+        /RF-Server/report/deleteReport?report-id=<id>.
+
+        VALIDADO en vivo end-to-end (Phase 14, 2026-09-23,
+        test_delete_report_fix_20260923_171909.txt): el identificador va
+        en la query string con el nombre 'report-id' (con guion). La
+        peticion requiere replicar los headers exactos de una captura real
+        del navegador (ver _rf_server_delete()): 'Accept: txt/html', sin
+        'Content-Type', y un header 'server-name' vacio; sin esto el
+        servidor responde HTTP 500 con cuerpo vacio de forma consistente.
+        La respuesta exitosa es HTTP 200 con cuerpo vacio; se considera
+        exitosa si no se lanza excepcion.
+
+        Args:
+            report_id: UUID del reporte a eliminar (por ejemplo, el
+                'reportId' devuelto por create_report()/save_report_as()
+                o por list_saved_reports()).
+
+        OPERACION MUTATIVA: no la ejecutes contra reportes de produccion
+        sin confirmar que el ID corresponde al reporte correcto.
+        """
+        self._rf_server_delete("report/deleteReport", params={"report-id": report_id})
 
     # ─────────────────────────────────────────────────────────────────────
     # Jobs activos (Automation API /run/)

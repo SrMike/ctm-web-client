@@ -191,11 +191,15 @@ class ControlMDownloader:
         reports_dir = os.path.join(self.output_dir, "reports")
         os.makedirs(reports_dir, exist_ok=True)
 
+        safe_report_id = "".join(
+            c if c.isalnum() or c in "._-" else "_" for c in report_id
+        )
+
         if format == "csv":
-            path = os.path.join(reports_dir, f"report_{report_id}.csv")
+            path = os.path.join(reports_dir, f"report_{safe_report_id}.csv")
             return CSVExporter.export(data, path)
         else:
-            path = os.path.join(reports_dir, f"report_{report_id}.json")
+            path = os.path.join(reports_dir, f"report_{safe_report_id}.json")
             return JSONExporter.export(data, path)
 
     def download_folder_definition_xml(
