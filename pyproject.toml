@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ctm-web-client"
-version = "2.1.0"
+version = "2.2.0"
 description = "Cliente Python para Control-M/EM Web: reportes, logs, outputs y definiciones XML de folders"
 readme = "README.md"
 requires-python = ">=3.10"

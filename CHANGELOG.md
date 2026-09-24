@@ -2,7 +2,7 @@
 
 Todos los cambios relevantes de este proyecto se documentan aquí.
 
-## Sin publicar
+## 2.2.0
 
 ### Corregido
 
