@@ -2,6 +2,23 @@
 
 Todos los cambios relevantes de este proyecto se documentan aquí.
 
+## 2.2.1
+
+### Corregido
+
+- `create_report_from_file()` exigía que el reporte fuente ya estuviera
+  guardado en `list_saved_reports()` de la cuenta/entorno actual, incluso
+  cuando el propio archivo `.em.json` ya traía `categoryId`/
+  `reportDesignName`/`templateId` (como los produce
+  `export_all_reports_em_json.py`). Esto impedía crear reportes a partir
+  de archivos `.em.json` exportados de otra cuenta/entorno distinto al
+  que se está usando. Ahora esos 3 campos se resuelven en orden de
+  prioridad: (1) `source_report_name` explícito → debe existir en el
+  catálogo; (2) si no se pasa, y el `reportName` del archivo coincide con
+  un reporte ya guardado, se usan sus datos; (3) en cualquier otro caso,
+  se usan directamente los del archivo. Solo lanza `ControlMWebError` si
+  ninguna de las dos fuentes provee `reportDesignName`/`templateId`.
+
 ## 2.2.0
 
 ### Corregido

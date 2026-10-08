@@ -1124,13 +1124,25 @@ class ControlMWebClient:
         nueva del catalogo (POST /RF-Server/report/addNewReport).
 
         LIMITACION HEREDADA de create_report()/save_report_as(): el array
-        'columns' no se puede construir desde cero (depende del diseno
-        BIRT del reporte). Por eso este metodo, igual que save_report_as(),
-        toma prestado el esqueleto de 'columns' de un reporte YA GUARDADO
-        en el catalogo con el mismo reportDesignName/templateId, y encima
-        aplica el 'userData'/'description'/'categoryId'/'reportDesignName'/
-        'templateId' del archivo. Replica el flujo validado end-to-end en
-        test_report_lifecycle.py.
+        'columns' no se puede construir desde cero en el cliente (depende
+        del diseno BIRT del reporte, calculado por el servidor). Por eso
+        este metodo obtiene el esqueleto de 'columns' llamando a
+        get_report_metadata() con el 'categoryId'/'reportDesignName'/
+        'templateId' correspondientes.
+
+        Esos 3 campos se resuelven en este orden de prioridad:
+        1. Si se paso 'source_report_name' explicito, DEBE existir en
+           list_saved_reports() de la cuenta actual (plantilla obligatoria).
+        2. Si no se paso 'source_report_name' pero el 'reportName' del
+           propio archivo SI coincide con un reporte ya guardado en esta
+           cuenta, se usan los datos de ese reporte.
+        3. En cualquier otro caso (el reporte no esta guardado en ESTA
+           cuenta, p. ej. viene de otro ambiente/usuario), se usan
+           'categoryId'/'reportDesignName'/'templateId' directamente del
+           propio archivo .em.json -- NO es necesario que el reporte ya
+           exista en el catalogo de la cuenta actual, siempre que el
+           archivo incluya esos 3 campos (asi los produce
+           export_all_reports_em_json.py y el boton "Export" de la UI).
 
         Args:
             em_json_path: Ruta a un archivo .em.json (debe incluir al
@@ -1139,23 +1151,24 @@ class ControlMWebClient:
                 'templateId').
             source_report_name: Nombre exacto de un reporte ya guardado
                 (ver list_saved_reports()) que sirva de plantilla de
-                columnas. Si se omite, se usa el 'reportName' del propio
-                archivo (asume que ya existe un reporte guardado con ese
-                nombre en el catalogo).
+                columnas. Si se pasa, es OBLIGATORIO que exista en el
+                catalogo (falla si no). Si se omite, se intenta resolver
+                automaticamente (ver orden de prioridad arriba).
             new_report_name: Nombre para el reporte nuevo. Si se omite, se
                 usa el 'reportName' del archivo.
             description: Descripcion para el reporte nuevo; si se omite,
-                se usa la del archivo (o la del reporte fuente si el
-                archivo no trae 'description').
+                se usa la del archivo (o la del reporte fuente/plantilla).
 
         Returns:
             Dict con la metadata del reporte guardado, incluyendo el
             'reportId' (UUID) generado por el servidor.
 
         Raises:
-            ControlMWebError: si no se pudo determinar un reporte fuente,
-                si ese nombre no aparece en list_saved_reports(), o si el
-                servidor rechaza la operacion.
+            ControlMWebError: si no se pudo determinar un nombre para el
+                reporte nuevo, si 'source_report_name' se paso mucho pero
+                no existe en list_saved_reports(), si no se pudieron
+                determinar 'categoryId'/'reportDesignName'/'templateId' de
+                ninguna fuente, o si el servidor rechaza la operacion.
 
         OPERACION MUTATIVA: crea un reporte real en el catalogo del
         servidor.
@@ -1165,45 +1178,68 @@ class ControlMWebClient:
             em_json = _json.load(f)
 
         file_report_name = em_json.get("reportName", "")
-        resolved_source_name = source_report_name or file_report_name
-        if not resolved_source_name:
+        final_report_name = new_report_name or file_report_name
+        if not final_report_name:
             raise ControlMWebError(
-                "No se pudo determinar el reporte fuente: el archivo no "
-                "tiene 'reportName' y no se paso source_report_name."
+                "No se pudo determinar el nombre del reporte nuevo: el "
+                "archivo no tiene 'reportName' y no se paso new_report_name."
             )
 
-        existing_reports = self.list_saved_reports()
-        source_entry = next(
-            (r for r in existing_reports if r.get("reportName") == resolved_source_name),
-            None,
-        )
-        if source_entry is None:
+        resolved_source_name = source_report_name or file_report_name
+        source_entry = None
+        if resolved_source_name:
+            existing_reports = self.list_saved_reports()
+            source_entry = next(
+                (r for r in existing_reports if r.get("reportName") == resolved_source_name),
+                None,
+            )
+        if source_entry is None and source_report_name:
             raise ControlMWebError(
                 f"Reporte de origen no encontrado en list_saved_reports(): "
-                f"{resolved_source_name!r}. create_report_from_file() "
-                f"necesita un reporte ya guardado con el mismo "
-                f"reportDesignName/templateId para tomar el esqueleto de "
-                f"'columns' (no se puede construir desde cero)."
+                f"{source_report_name!r}."
+            )
+
+        category_id = source_entry.get("categoryId") if source_entry else None
+        report_design_name = source_entry.get("reportDesignName") if source_entry else None
+        template_id = source_entry.get("templateId") if source_entry else None
+        base_description = source_entry.get("description", "") if source_entry else ""
+
+        if category_id is None:
+            category_id = em_json.get("categoryId")
+        if not report_design_name:
+            report_design_name = em_json.get("reportDesignName")
+        if template_id is None:
+            template_id = em_json.get("templateId")
+        if not base_description:
+            base_description = em_json.get("description", "")
+
+        if not report_design_name or template_id is None:
+            raise ControlMWebError(
+                "No se pudo determinar 'reportDesignName'/'templateId': no "
+                "hay un reporte guardado en esta cuenta que sirva de "
+                "plantilla y el archivo .em.json tampoco los incluye. Sin "
+                "esos datos no se puede obtener el esqueleto de 'columns' "
+                "(loadReportMetadata)."
             )
 
         metadata = self.get_report_metadata(
-            resolved_source_name,
-            description=source_entry.get("description", ""),
-            category_id=source_entry.get("categoryId"),
-            report_design_name=source_entry.get("reportDesignName"),
-            template_id=source_entry.get("templateId"),
+            resolved_source_name or final_report_name,
+            description=base_description,
+            category_id=category_id,
+            report_design_name=report_design_name,
+            template_id=template_id,
         )
 
         new_definition = dict(metadata)
         new_definition["reportId"] = "NEW_REPORT"
-        new_definition["reportName"] = new_report_name or file_report_name or resolved_source_name
+        new_definition["reportName"] = final_report_name
         new_definition["description"] = (
             description if description is not None
             else em_json.get("description", metadata.get("description", ""))
         )
-        new_definition["categoryId"] = em_json.get("categoryId", metadata.get("categoryId"))
-        new_definition["reportDesignName"] = em_json.get("reportDesignName", metadata.get("reportDesignName"))
-        new_definition["templateId"] = em_json.get("templateId", metadata.get("templateId"))
+        new_definition["categoryId"] = category_id
+        new_definition["reportDesignName"] = report_design_name
+        new_definition["templateId"] = template_id
         new_definition["userData"] = em_json.get("userData", metadata.get("userData"))
         new_definition["userName"] = self._username
         new_definition["isFavorite"] = None

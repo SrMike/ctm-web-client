@@ -297,8 +297,9 @@ def test_create_report_from_file_uses_explicit_new_name(tmp_path) -> None:
     assert result["reportName"] == "Report A - Prueba"
 
 
-def test_create_report_from_file_raises_when_source_not_in_catalog(tmp_path) -> None:
-    em_json_path = write_temp_em_json(tmp_path, {"reportName": "No existe en catalogo"})
+def test_create_report_from_file_raises_when_explicit_source_not_found(tmp_path) -> None:
+    """Si el llamador PIDE explícitamente una plantilla, debe existir."""
+    em_json_path = write_temp_em_json(tmp_path, {"reportName": "Reporte del archivo"})
 
     def rf_get(path, **kwargs):
         return FakeResponse([])  # catálogo vacío
@@ -306,6 +307,64 @@ def test_create_report_from_file_raises_when_source_not_in_catalog(tmp_path) -> 
     client, _ = make_client(rf_get=rf_get)
 
     with pytest.raises(ControlMWebError, match="no encontrado"):
+        client.create_report_from_file(
+            str(em_json_path), source_report_name="Plantilla inexistente"
+        )
+
+
+def test_create_report_from_file_uses_file_design_when_not_in_catalog(tmp_path) -> None:
+    """Caso real: el reporte no está guardado en ESTA cuenta/entorno, pero
+    el .em.json ya trae categoryId/reportDesignName/templateId (como los
+    produce export_all_reports_em_json.py). No debe requerir que el
+    reporte exista en list_saved_reports()."""
+    metadata = make_source_metadata()
+    em_json_path = write_temp_em_json(tmp_path, {
+        "reportName": "Reporte no cargado en esta cuenta",
+        "description": "Descripcion del archivo",
+        "userData": {"userSorts": [], "userGroups": [], "userFilters": []},
+        "categoryId": "1",
+        "reportDesignName": "fake-design.rptdesign",
+        "templateId": 1,
+    })
+
+    def rf_get(path, **kwargs):
+        return FakeResponse([])  # catálogo vacío: el reporte no existe aquí
+
+    def rf_post(path, json_body=None, **kwargs):
+        if path == "report/loadReportMetadata":
+            # Debe resolver categoryId/reportDesignName/templateId desde
+            # el propio archivo, no desde el catálogo.
+            assert json_body["categoryId"] == "1"
+            assert json_body["reportDesignName"] == "fake-design.rptdesign"
+            assert json_body["templateId"] == 1
+            return FakeResponse(metadata)
+        if path == "report/addNewReport":
+            assert json_body["reportName"] == "Reporte no cargado en esta cuenta"
+            assert json_body["categoryId"] == "1"
+            assert json_body["reportDesignName"] == "fake-design.rptdesign"
+            assert json_body["templateId"] == 1
+            return FakeResponse({**json_body, "reportId": NEW_REPORT_ID})
+        raise AssertionError(f"Ruta POST inesperada: {path}")
+
+    client, _ = make_client(rf_get=rf_get, rf_post=rf_post)
+
+    result = client.create_report_from_file(str(em_json_path))
+
+    assert result["reportId"] == NEW_REPORT_ID
+    assert result["reportName"] == "Reporte no cargado en esta cuenta"
+
+
+def test_create_report_from_file_raises_when_design_fields_missing_anywhere(tmp_path) -> None:
+    """Si ni el catálogo ni el archivo traen reportDesignName/templateId,
+    no hay forma de obtener el esqueleto de 'columns'."""
+    em_json_path = write_temp_em_json(tmp_path, {"reportName": "Reporte incompleto"})
+
+    def rf_get(path, **kwargs):
+        return FakeResponse([])  # catálogo vacío
+
+    client, _ = make_client(rf_get=rf_get)
+
+    with pytest.raises(ControlMWebError, match="reportDesignName"):
         client.create_report_from_file(str(em_json_path))
 
 
@@ -314,7 +373,7 @@ def test_create_report_from_file_raises_when_no_report_name_anywhere(tmp_path) -
 
     client, _ = make_client()
 
-    with pytest.raises(ControlMWebError, match="reporte fuente"):
+    with pytest.raises(ControlMWebError, match="nombre del reporte nuevo"):
         client.create_report_from_file(str(em_json_path))
 
 

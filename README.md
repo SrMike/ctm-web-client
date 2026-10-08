@@ -107,10 +107,14 @@ print(nuevo_desde_archivo["reportId"])
 client.delete_report(nuevo["reportId"])
 ```
 
-`create_report_from_file()` requiere que ya exista en el catálogo un
-reporte guardado con el mismo `reportDesignName`/`templateId` (propio o
-indicado con `source_report_name`), del cual toma el esqueleto de
-`columns` — no se puede construir desde cero.
+`create_report_from_file()` necesita `categoryId`/`reportDesignName`/
+`templateId` para obtener el esqueleto de `columns` (no se puede
+construir desde cero, depende del diseño BIRT). Los resuelve en este
+orden: (1) si pasas `source_report_name` explícito, DEBE existir en
+`list_saved_reports()`; (2) si no, y el propio archivo ya trae esos 3
+campos (como los produce `export_all_reports_em_json.py`), los usa
+directamente — **sin requerir que el reporte ya esté guardado en esta
+cuenta/entorno**; (3) solo falla si ninguna de las dos fuentes los provee.
 
 `delete_report()` requiere headers exactos (`Accept: txt/html`, sin
 `Content-Type`, header `server-name` vacío) confirmados contra una captura
